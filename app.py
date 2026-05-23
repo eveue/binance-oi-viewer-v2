@@ -232,8 +232,8 @@ with tab_chart:
                        dict(count=3, label="3m", step="month", stepmode="backward"),
                        dict(step="all", label="全部"),
                    ])),
-        yaxis=dict(title="未平仓合约名义价值 (Million USD)", gridcolor="#f1f5f9",
-                   titlefont=dict(color="#2563eb"), tickfont=dict(color="#2563eb")),
+        yaxis=dict(title=dict(text="未平仓合约名义价值 (Million USD)", font=dict(color="#2563eb")),
+                   gridcolor="#f1f5f9", tickfont=dict(color="#2563eb")),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
 
@@ -245,8 +245,8 @@ with tab_chart:
             hovertemplate="<b>%{x|%Y-%m-%d %H:%M} UTC</b><br>价格: $%{y:,.4g}<extra></extra>",
         ))
         layout_kwargs["yaxis2"] = dict(
-            title="价格 (USD)", overlaying="y", side="right",
-            showgrid=False, titlefont=dict(color="#d97706"), tickfont=dict(color="#d97706"),
+            title=dict(text="价格 (USD)", font=dict(color="#d97706")), overlaying="y", side="right",
+            showgrid=False, tickfont=dict(color="#d97706"),
         )
 
     fig.update_layout(**layout_kwargs)
