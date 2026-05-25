@@ -78,6 +78,24 @@ def _get(path: str, params: dict) -> list | dict:
     return resp.json()
 
 
+def _safe_float(v):
+    """任何值安全转 float，失败返回 None。"""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(v):
+    """任何值安全转 int（先经 float，容忍 '43.294' / 1.7e9 等），失败返回 None。"""
+    f = _safe_float(v)
+    if f is None:
+        return None
+    return int(f)
+
+
 @dataclass
 class Contract:
     """一个合约（某币种在某所的某种合约）。"""
@@ -220,7 +238,11 @@ def open_interest_history(symbol: str, start_ts: int, end_ts: int,
     hist = rows[0].get("history", []) if isinstance(rows, list) else []
     out = []
     for h in hist:
-        out.append({"t": int(h.get("t", 0)), "c": float(h.get("c") or 0)})
+        t = _safe_int(h.get("t"))
+        c = _safe_float(h.get("c"))
+        if t is None or c is None:
+            continue
+        out.append({"t": t, "c": c})
     return out
 
 
@@ -244,7 +266,14 @@ def price_history(symbol: str, start_ts: int, end_ts: int,
     if not rows:
         return []
     hist = rows[0].get("history", []) if isinstance(rows, list) else []
-    return [{"t": int(h.get("t", 0)), "c": float(h.get("c") or 0)} for h in hist]
+    out = []
+    for h in hist:
+        t = _safe_int(h.get("t"))
+        c = _safe_float(h.get("c"))
+        if t is None or c is None:
+            continue
+        out.append({"t": t, "c": c})
+    return out
 
 
 # --------------------------------------------------------------------------
