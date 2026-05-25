@@ -202,23 +202,47 @@ with c4:
 
 # ---------------------------- 各所明细表 + 勾选 ----------------------------
 st.markdown('<div class="sec-header">各交易所合约明细</div>', unsafe_allow_html=True)
-st.markdown('<div class="sec-sub">勾选要计入聚合曲线的合约；按当前 OI 降序</div>', unsafe_allow_html=True)
+st.markdown('<div class="sec-sub">勾选要计入聚合曲线的合约（默认勾选当前有持仓的合约）；按当前 OI 降序</div>', unsafe_allow_html=True)
 
-# 默认勾选 OI>0 的合约
-selected_symbols = []
+# 构造带勾选列的明细表
 detail_rows = []
 for c in contracts:
     share = c["cur"] / total_now * 100 if total_now else 0
     detail_rows.append({
+        "计入聚合": c["cur"] > 0,          # 默认勾选有持仓的
         "合约": c["display"],
         "类型": "DEX" if c["is_dex"] else "CEX",
         "当前 OI": fmt_usd_m(c["cur"]) if c["cur"] else "—",
         "占比": f"{share:.1f}%" if c["cur"] else "—",
+        "_symbol": c["symbol"],          # 隐藏列，用于回溯
     })
-    if c["cur"] > 0:
-        selected_symbols.append(c["symbol"])
 
-st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True, height=min(400, 60 + 35*len(detail_rows)))
+detail_df = pd.DataFrame(detail_rows)
+edited = st.data_editor(
+    detail_df,
+    use_container_width=True,
+    hide_index=True,
+    height=min(460, 60 + 35 * len(detail_rows)),
+    column_config={
+        "计入聚合": st.column_config.CheckboxColumn("计入聚合", width="small"),
+        "_symbol": None,                 # 隐藏 symbol 列
+        "合约": st.column_config.TextColumn("合约", disabled=True),
+        "类型": st.column_config.TextColumn("类型", disabled=True),
+        "当前 OI": st.column_config.TextColumn("当前 OI", disabled=True),
+        "占比": st.column_config.TextColumn("占比", disabled=True),
+    },
+    disabled=["合约", "类型", "当前 OI", "占比"],
+    key="contract_editor",
+)
+
+# 取勾选的合约
+selected_symbols = [
+    row["_symbol"] for _, row in edited.iterrows() if row["计入聚合"]
+]
+
+if not selected_symbols:
+    st.info("请至少勾选一个合约以生成聚合曲线。")
+    st.stop()
 
 
 # ---------------------------- 聚合历史曲线（主图）----------------------------
