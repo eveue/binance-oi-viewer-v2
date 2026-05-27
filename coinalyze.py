@@ -69,8 +69,8 @@ def _get(path: str, params: dict) -> list | dict:
     for attempt in range(3):
         resp = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
         if resp.status_code == 429:               # 触发限频，等一下再试
-            wait = int(resp.headers.get("Retry-After", "2"))
-            _time.sleep(min(wait, 5))
+            ra = _safe_float(resp.headers.get("Retry-After")) or 2.0
+            _time.sleep(min(ra, 6))
             continue
         resp.raise_for_status()
         return resp.json()
@@ -281,19 +281,41 @@ def price_history(symbol: str, start_ts: int, end_ts: int,
 # --------------------------------------------------------------------------
 def aggregate_oi_history_by_symbols(symbols: list[str], start_ts: int, end_ts: int,
                                     interval: Optional[str] = None):
-    """按 symbol 字符串列表聚合（供上层缓存调用，避免传对象）。"""
+    """
+    按 symbol 列表聚合 OI 历史（按时间戳对齐求和）。
+    优化：批量请求（每批最多 20 个 symbol 合并成一次 API 调用），
+    大幅减少调用次数，避开 40/min 限频。
+    """
     if interval is None:
         interval = pick_interval(end_ts - start_ts)
+
     bucket_sum: dict[int, float] = {}
     per_contract: dict[str, dict] = {}
-    for sym in symbols:
-        hist = open_interest_history(sym, start_ts, end_ts, interval, convert_to_usd=True)
-        series = {}
-        for point in hist:
-            t, v = point["t"], point["c"]
-            series[t] = v
-            bucket_sum[t] = bucket_sum.get(t, 0.0) + v
-        per_contract[sym] = series
+
+    for i in range(0, len(symbols), 20):
+        batch = symbols[i:i + 20]
+        rows = _get("/open-interest-history", {
+            "symbols": ",".join(batch),
+            "interval": interval,
+            "from": int(start_ts),
+            "to": int(end_ts),
+            "convert_to_usd": "true",
+        })
+        if not isinstance(rows, list):
+            continue
+        # 每个 symbol 一个 {"symbol":.., "history":[...]}
+        for item in rows:
+            sym = item.get("symbol", "")
+            series = {}
+            for h in item.get("history", []):
+                t = _safe_int(h.get("t"))
+                c = _safe_float(h.get("c"))
+                if t is None or c is None:
+                    continue
+                series[t] = c
+                bucket_sum[t] = bucket_sum.get(t, 0.0) + c
+            per_contract[sym] = series
+
     timestamps = sorted(bucket_sum.keys())
     totals = [bucket_sum[t] for t in timestamps]
     return timestamps, totals, per_contract
