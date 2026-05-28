@@ -128,6 +128,9 @@ with st.sidebar:
     st.caption(f"查询跨度：{span_days} 天")
     show_price = st.checkbox("叠加价格", value=True)
     run = st.button("查询", type="primary", use_container_width=True)
+    if st.button("清空缓存", use_container_width=True):
+        st.cache_data.clear()
+        st.success("已清空缓存，请重新查询。")
 
 
 if not run:
@@ -251,11 +254,15 @@ st.markdown(
     f'<div class="sec-sub">{base} 全交易所永续合约 OI 之和（美元名义价值）· '
     f'{start_dt:%Y-%m-%d} ~ {end_dt:%Y-%m-%d} UTC</div>', unsafe_allow_html=True)
 
-with st.spinner("正在拉取各合约历史并聚合（合约较多时需要一点时间）..."):
+with st.spinner("正在拉取各合约历史并聚合（合约较多时需要 10-30 秒）..."):
     try:
         ts, totals, per = get_agg_history(tuple(selected_symbols), start_ts, end_ts)
     except Exception as e:
-        st.error(f"聚合历史加载失败：{e}")
+        msg = str(e)
+        # 兜底过滤：避免把 URL / api_key 暴露到前端
+        if "api_key" in msg or "http" in msg.lower():
+            msg = "请求频率受限或网络异常，请等 1 分钟后再查询。"
+        st.error(f"聚合历史加载失败：{msg}")
         st.stop()
 
 if not ts:
