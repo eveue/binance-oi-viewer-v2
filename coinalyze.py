@@ -35,6 +35,31 @@ import requests
 API_BASE = "https://api.coinalyze.net/v1"
 HTTP_TIMEOUT = 20
 
+# 内部限速：Coinalyze 限 40 次/分钟，我们留余量按 35 算
+_RATE_LIMIT_PER_MIN = 35
+_call_timestamps: list[float] = []   # 最近的请求时间戳
+
+
+def _throttle():
+    """阻塞直到能发起下一次请求（滑动窗口）。"""
+    now = _time.time()
+    # 清理 60 秒之前的
+    cutoff = now - 60
+    while _call_timestamps and _call_timestamps[0] < cutoff:
+        _call_timestamps.pop(0)
+    if len(_call_timestamps) >= _RATE_LIMIT_PER_MIN:
+        # 等到最早那次调用满 60 秒
+        wait = 60 - (now - _call_timestamps[0]) + 0.2
+        if wait > 0:
+            _time.sleep(wait)
+        # 再清一次
+        now = _time.time()
+        cutoff = now - 60
+        while _call_timestamps and _call_timestamps[0] < cutoff:
+            _call_timestamps.pop(0)
+    _call_timestamps.append(_time.time())
+
+
 # 交易所代号 → 名称（实测 /exchanges 返回）
 EXCHANGE_CODES = {
     "P": "Poloniex", "V": "Vertex", "D": "Bitforex", "K": "Kraken",
@@ -62,20 +87,33 @@ def _api_key() -> str:
 
 
 def _get(path: str, params: dict) -> list | dict:
-    """统一 GET，带 Key、限频重试。"""
+    """统一 GET：主动限速 + 429 重试 + 干净错误（不含 Key）。"""
     params = dict(params or {})
     params["api_key"] = _api_key()
     url = f"{API_BASE}{path}"
-    for attempt in range(3):
-        resp = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
-        if resp.status_code == 429:               # 触发限频，等一下再试
-            ra = _safe_float(resp.headers.get("Retry-After")) or 2.0
-            _time.sleep(min(ra, 6))
+    last_exc = None
+    for attempt in range(6):
+        _throttle()                                 # 主动控速，避免触发 429
+        try:
+            resp = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+        except requests.RequestException as e:
+            last_exc = e
+            _time.sleep(2)
             continue
-        resp.raise_for_status()
+        if resp.status_code == 429:                 # 真触发了，强等
+            ra = _safe_float(resp.headers.get("Retry-After")) or (5.0 * (attempt + 1))
+            _time.sleep(min(max(ra, 8), 30))
+            continue
+        if resp.status_code >= 500:
+            _time.sleep(2 + attempt * 2)
+            continue
+        if not resp.ok:
+            # 抛干净错误，不暴露 URL 和 Key
+            raise RuntimeError(f"API 错误 {resp.status_code}：{path}")
         return resp.json()
-    resp.raise_for_status()
-    return resp.json()
+    if last_exc:
+        raise RuntimeError(f"网络异常：{type(last_exc).__name__}")
+    raise RuntimeError("请求频率受限，请稍后再查（建议等 1 分钟）")
 
 
 def _safe_float(v):
@@ -185,8 +223,8 @@ def current_open_interest(symbols: list[str], convert_to_usd: bool = True) -> di
     返回 {symbol: value}。convert_to_usd=True 时 value 为美元名义价值。
     """
     result: dict[str, float] = {}
-    for i in range(0, len(symbols), 20):
-        batch = symbols[i:i + 20]
+    for i in range(0, len(symbols), 8):
+        batch = symbols[i:i + 8]
         rows = _get("/open-interest", {
             "symbols": ",".join(batch),
             "convert_to_usd": "true" if convert_to_usd else "false",
@@ -283,8 +321,9 @@ def aggregate_oi_history_by_symbols(symbols: list[str], start_ts: int, end_ts: i
                                     interval: Optional[str] = None):
     """
     按 symbol 列表聚合 OI 历史（按时间戳对齐求和）。
-    优化：批量请求（每批最多 20 个 symbol 合并成一次 API 调用），
-    大幅减少调用次数，避开 40/min 限频。
+
+    Coinalyze 的限频按请求中 symbol 数量计费，且历史接口较严，
+    因此采用小批次（每批 4 个）+ 批次间主动间隔，避免触发 429。
     """
     if interval is None:
         interval = pick_interval(end_ts - start_ts)
@@ -292,8 +331,11 @@ def aggregate_oi_history_by_symbols(symbols: list[str], start_ts: int, end_ts: i
     bucket_sum: dict[int, float] = {}
     per_contract: dict[str, dict] = {}
 
-    for i in range(0, len(symbols), 20):
-        batch = symbols[i:i + 20]
+    BATCH = 4                     # 每批合约数（保守，避开按-symbol计费的限频）
+    GAP = 1.6                     # 批次间隔秒，把节奏控制在限频内
+
+    batches = [symbols[i:i + BATCH] for i in range(0, len(symbols), BATCH)]
+    for idx, batch in enumerate(batches):
         rows = _get("/open-interest-history", {
             "symbols": ",".join(batch),
             "interval": interval,
@@ -301,20 +343,21 @@ def aggregate_oi_history_by_symbols(symbols: list[str], start_ts: int, end_ts: i
             "to": int(end_ts),
             "convert_to_usd": "true",
         })
-        if not isinstance(rows, list):
-            continue
-        # 每个 symbol 一个 {"symbol":.., "history":[...]}
-        for item in rows:
-            sym = item.get("symbol", "")
-            series = {}
-            for h in item.get("history", []):
-                t = _safe_int(h.get("t"))
-                c = _safe_float(h.get("c"))
-                if t is None or c is None:
-                    continue
-                series[t] = c
-                bucket_sum[t] = bucket_sum.get(t, 0.0) + c
-            per_contract[sym] = series
+        if isinstance(rows, list):
+            for item in rows:
+                sym = item.get("symbol", "")
+                series = {}
+                for h in item.get("history", []):
+                    t = _safe_int(h.get("t"))
+                    c = _safe_float(h.get("c"))
+                    if t is None or c is None:
+                        continue
+                    series[t] = c
+                    bucket_sum[t] = bucket_sum.get(t, 0.0) + c
+                per_contract[sym] = series
+        # 除最后一批外，批次间主动等待，平滑请求节奏
+        if idx < len(batches) - 1:
+            _time.sleep(GAP)
 
     timestamps = sorted(bucket_sum.keys())
     totals = [bucket_sum[t] for t in timestamps]
